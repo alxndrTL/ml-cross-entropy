@@ -6,14 +6,15 @@ import triton
 import triton.language as tl
 
 from cut_cross_entropy.tl_autotune import cce_forward_autotune
-from cut_cross_entropy.tl_utils import b_bin_fn, tl_logaddexp, tl_softcapping
+from cut_cross_entropy.tl_utils import b_bin_fn, tl_softcapping
 
 
 def _cce_lse_forward_kernel(
     E,
     C,
     Bias,
-    LSE,
+    SumExp,
+    MaxVal,
     LA,
     Locks,
     Valids,
@@ -27,7 +28,6 @@ def _cce_lse_forward_kernel(
     stride_cv,
     stride_cd,
     stride_biasv,
-    stride_lse_b,
     stride_vb,
     num_locks,
     # Meta-parameters
@@ -97,21 +97,28 @@ def _cce_lse_forward_kernel(
         tl.atomic_add(LA + offs_v, this_avg_logit, mask=offs_v < V)
 
     this_mx = tl.max(logits, axis=1)
-    e = tl.exp(logits - this_mx[:, None])
-    this_lse = this_mx + tl.log(tl.sum(e, axis=1))
 
     offs_b = (pid_b * BLOCK_B + tl.arange(0, BLOCK_B)).to(tl.int64)
     o_mask = offs_b < B
 
-    lse_ptrs = LSE + (stride_lse_b * offs_b)
+    sum_exp_ptrs = SumExp + offs_b
+    max_val_ptrs = MaxVal + offs_b
 
     this_locks = Locks + (pid_b // tl.cdiv(B, BLOCK_B * num_locks))
     while tl.atomic_cas(this_locks, 0, 1) == 1:
         pass
 
-    lse = tl.load(lse_ptrs, mask=o_mask, other=0.0, eviction_policy="evict_last")
-    lse = tl_logaddexp(lse, this_lse)
-    tl.store(lse_ptrs, lse, mask=o_mask, eviction_policy="evict_last")
+    sum_exp = tl.load(sum_exp_ptrs, mask=o_mask, other=0.0, eviction_policy="evict_last")
+    old_max = tl.load(max_val_ptrs, mask=o_mask, other=0.0, eviction_policy="evict_last")
+
+    max_val = tl.maximum(old_max, this_mx)
+
+    this_sum_exp = tl.sum(tl.exp(logits - max_val[:, None]), axis=1)
+
+    sum_exp = sum_exp * tl.exp(old_max - max_val) + this_sum_exp
+
+    tl.store(sum_exp_ptrs, sum_exp, mask=o_mask, eviction_policy="evict_last")
+    tl.store(max_val_ptrs, max_val, mask=o_mask, eviction_policy="evict_last")
 
     tl.debug_barrier()
     tl.atomic_xchg(this_locks, 0)
@@ -190,7 +197,11 @@ def cce_lse_forward_kernel(
 
     V, D = c.shape
     # Allocates output.
-    lse = e.new_full((B,), -float("inf"), dtype=torch.float32)
+    sum_exp = e.new_full((B,), 0.0, dtype=torch.float32)
+    max_val = e.new_full((B,), -torch.inf, dtype=torch.float32)
+    assert sum_exp.stride(0) == 1
+    assert max_val.stride(0) == 1
+
     locks = e.new_full(
         (triton.cdiv(B, 128),),
         0,
@@ -210,7 +221,8 @@ def cce_lse_forward_kernel(
         e,
         c,
         bias,
-        lse,  #
+        sum_exp,
+        max_val,
         logit_avg,
         locks,
         valids,
@@ -224,11 +236,12 @@ def cce_lse_forward_kernel(
         c.stride(0),
         c.stride(1),  #
         1 if bias is None else bias.stride(0),
-        lse.stride(0),
         1 if valids is None else valids.stride(0),
         num_locks=locks.size(0),
         B_BIN=b_bin_fn(B),
     )
+
+    lse = sum_exp.log() + max_val
 
     if return_logit_avg:
         assert logit_avg is not None
