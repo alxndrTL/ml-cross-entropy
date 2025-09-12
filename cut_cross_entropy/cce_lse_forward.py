@@ -1,5 +1,5 @@
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
-from typing import Literal, overload
+from dataclasses import dataclass
 
 import torch
 import triton
@@ -16,9 +16,12 @@ def _cce_lse_forward_kernel(
     SumExp,
     MaxVal,
     LA,
+    CorrectLogit,
     Locks,
     Valids,
+    Targets,
     softcap,
+    shift,
     B,
     V,
     D,
@@ -42,6 +45,8 @@ def _cce_lse_forward_kernel(
     HAS_SOFTCAP: tl.constexpr,
     HAS_LA: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
+    HAS_TARGETS: tl.constexpr,
+    HAS_SHIFT: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_b = tl.cdiv(B, BLOCK_B)
@@ -96,9 +101,25 @@ def _cce_lse_forward_kernel(
         this_avg_logit = tl.sum(logits, 0) / B
         tl.atomic_add(LA + offs_v, this_avg_logit, mask=offs_v < V)
 
+    if HAS_TARGETS:
+        if HAS_SHIFT:
+            target_offs_b = offs_b + shift
+        else:
+            target_offs_b = offs_b
+
+        this_targets = tl.load(Targets + target_offs_b, mask=target_offs_b < BMax, other=V + 1)
+
+        offs_b = (pid_b * BLOCK_B + tl.arange(0, BLOCK_B)).to(tl.int64)
+
+        correct_logit_ptrs = CorrectLogit + offs_b
+
+        correct_logit_ptrs = tl.broadcast_to(correct_logit_ptrs[:, None], (BLOCK_B, BLOCK_V))
+        tl.store(correct_logit_ptrs, logits, mask=this_targets[:, None] == offs_v[None, :])
+    else:
+        offs_b = (pid_b * BLOCK_B + tl.arange(0, BLOCK_B)).to(tl.int64)
+
     this_mx = tl.max(logits, axis=1)
 
-    offs_b = (pid_b * BLOCK_B + tl.arange(0, BLOCK_B)).to(tl.int64)
     o_mask = offs_b < B
 
     sum_exp_ptrs = SumExp + offs_b
@@ -136,52 +157,30 @@ _cce_lse_forward_kernel = triton.heuristics(  # type: ignore
         "DOT_PRECISION": lambda args: "tf32"
         if torch.get_float32_matmul_precision() == "high"
         else "ieee",
+        "HAS_TARGETS": lambda args: args["Targets"] is not None,
+        "HAS_SHIFT": lambda args: args["shift"] != 0,
     }
 )(_cce_lse_forward_kernel)
 _cce_lse_forward_kernel = cce_forward_autotune()(_cce_lse_forward_kernel)  # type: ignore
 
 
-@overload
+@dataclass(slots=True)
+class LSEReturn:
+    lse: torch.Tensor
+    logit_avg: torch.Tensor | None
+    correct_logit: torch.Tensor | None
+
+
 def cce_lse_forward_kernel(
     e: torch.Tensor,
     c: torch.Tensor,
     bias: torch.Tensor | None = None,
     valids: torch.Tensor | None = None,
     softcap: float | None = None,
-    return_logit_avg: Literal[False] = False,
-) -> torch.Tensor: ...
-
-
-@overload
-def cce_lse_forward_kernel(
-    e: torch.Tensor,
-    c: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    valids: torch.Tensor | None = None,
-    softcap: float | None = None,
-    return_logit_avg: Literal[True] = True,
-) -> tuple[torch.Tensor, torch.Tensor]: ...
-
-
-@overload
-def cce_lse_forward_kernel(
-    e: torch.Tensor,
-    c: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    valids: torch.Tensor | None = None,
-    softcap: float | None = None,
+    targets: torch.Tensor | None = None,
+    shift: int = 0,
     return_logit_avg: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor: ...
-
-
-def cce_lse_forward_kernel(
-    e: torch.Tensor,
-    c: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    valids: torch.Tensor | None = None,
-    softcap: float | None = None,
-    return_logit_avg: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+) -> LSEReturn:
     # Check constraints.
     assert e.shape[1] == c.shape[1], "Incompatible dimensions"
     assert e.is_contiguous(), "Matrix A must be contiguous"
@@ -199,6 +198,7 @@ def cce_lse_forward_kernel(
     # Allocates output.
     sum_exp = e.new_full((B,), 0.0, dtype=torch.float32)
     max_val = e.new_full((B,), -torch.inf, dtype=torch.float32)
+    correct_logit = e.new_full((B,), 0.0, dtype=torch.float32) if targets is not None else None
     assert sum_exp.stride(0) == 1
     assert max_val.stride(0) == 1
 
@@ -224,9 +224,12 @@ def cce_lse_forward_kernel(
         sum_exp,
         max_val,
         logit_avg,
+        correct_logit,
         locks,
         valids,
+        targets,
         softcap,
+        shift,
         B,
         V,
         D,  #
@@ -243,8 +246,4 @@ def cce_lse_forward_kernel(
 
     lse = sum_exp.log() + max_val
 
-    if return_logit_avg:
-        assert logit_avg is not None
-        return lse, logit_avg
-    else:
-        return lse
+    return LSEReturn(lse, logit_avg, correct_logit)
