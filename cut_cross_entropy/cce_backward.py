@@ -204,16 +204,19 @@ def _cce_backward_kernel(
 
         targets = tl.load(Targets + target_offs_b, mask=target_offs_b < BMax, other=V + 1)
         is_target = targets[:, None] == offs_v[None, :]
-        d_accum += tl.where(is_target, -1.0, 0.0)
     else:
         is_target = None
 
     should_skip = False
     if (FILTER_E_GRAD and COMPUTE_DE) and (FILTER_C_GRAD and COMPUTE_DC):
-        if _block_is_filtered(tl.abs(d_accum), filter_eps):
+        if _block_is_filtered(
+            tl.abs(d_accum + tl.where(is_target, -1.0, 0.0) if HAS_TARGETS else d_accum), filter_eps
+        ):
             return
     elif (FILTER_E_GRAD and COMPUTE_DE) or (FILTER_C_GRAD and COMPUTE_DC):
-        should_skip = _block_is_filtered(tl.abs(d_accum), filter_eps)
+        should_skip = _block_is_filtered(
+            tl.abs(d_accum + tl.where(is_target, -1.0, 0.0) if HAS_TARGETS else d_accum), filter_eps
+        )
 
     if ITEM_DO:
         d_out = tl.load(dOut)
@@ -227,6 +230,7 @@ def _cce_backward_kernel(
 
     d_out = grad_scale * d_out
 
+    d_xe = (d_accum + tl.where(is_target, -1.0, 0.0) if HAS_TARGETS else d_accum) * d_out
     if HAS_DLSE:
         if HAS_SHIFT:
             d_lse_offs_b = offs_b + shift
@@ -235,17 +239,12 @@ def _cce_backward_kernel(
 
         d_lse = tl.load(dLSE + d_lse_offs_b, mask=d_lse_offs_b < BMax, other=0.0)[:, None]
 
-        d_accum *= d_out + d_lse
-
-        if HAS_TARGETS:
-            # We have d_accum = d_mm - is_target
-            # We then want to get d_accum = d_mm * (d_out + d_lse) - is_target * d_out
-            # If we do d_accum * (d_out + d_lse), we get d_mm * (d_out + d_lse) - is_target * (d_out + d_lse)
-            # So we need to do d_accum += is_target * d_lse
-
-            d_accum += tl.where(is_target, d_lse, 0.0)
+        d_accum = (
+            d_xe.to(e_ptrs.dtype.element_ty) + (d_lse * d_accum).to(e_ptrs.dtype.element_ty)
+        ).to(d_accum.dtype)
+        # d_accum = d_xe + (d_lse * d_accum)
     else:
-        d_accum = d_accum * d_out
+        d_accum = d_xe
 
     if HAS_SOFTCAP:
         d_accum = tl_softcapping_grad(d_accum, accum, softcap)
