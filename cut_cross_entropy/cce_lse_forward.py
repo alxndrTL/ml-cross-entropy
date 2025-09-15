@@ -83,10 +83,11 @@ def _cce_lse_forward_kernel(
 
     tl.debug_barrier()
 
+    accum = accum.to(dtype=E.dtype.element_ty)
     if HAS_BIAS:
         bias = tl.load(Bias + offs_v * stride_biasv, mask=offs_v < V, other=0.0)
-        bias = bias.to(dtype=accum.dtype)
         accum += bias[None, :]
+    accum = accum.to(dtype=tl.float32)
 
     logits = tl.where(offs_v[None, :] < V, accum, -float("inf"))
     if HAS_SOFTCAP:
