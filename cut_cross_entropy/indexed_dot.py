@@ -75,10 +75,10 @@ def _indexed_neg_dot_forward_kernel(
     dot = e.to(tl.float32) * c.to(tl.float32)
     neg_dot = -tl.sum(dot, 1)
 
+    neg_dot = neg_dot.to(dtype=e_ptrs.dtype.element_ty)
     if HAS_BIAS:
         # Need the and (pid_d == 0) because otherwise the bias will be added ceil(D / BLOCK_D) times!
         bias = tl.load(Bias + inds * stride_biasv, mask=(inds < V) & (pid_d == 0), other=0.0)
-        bias = bias.to(tl.float32)
         neg_dot -= bias
 
     offs_b = (tl.arange(0, BLOCK_B) + pid_b * BLOCK_B).to(tl.int64)
