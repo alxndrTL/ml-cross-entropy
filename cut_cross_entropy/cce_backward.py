@@ -234,6 +234,7 @@ def _cce_backward_kernel(
     d_xe = (d_accum + tl.where(is_target, -1.0, 0.0) if HAS_TARGETS else d_accum) * d_out
     if HAS_SOFTCAP:
         d_xe = tl_softcapping_grad(d_xe, accum, softcap)
+
     d_xe = d_xe.to(E.dtype.element_ty)
     if HAS_DLSE:
         if HAS_SHIFT:
@@ -245,7 +246,8 @@ def _cce_backward_kernel(
         if HAS_SOFTCAP:
             d_lse = tl_softcapping_grad(d_lse, accum, softcap)
 
-        d_accum = d_xe + d_lse.to(E.dtype.element_ty)
+        d_lse = d_lse.to(E.dtype.element_ty)
+        d_accum = d_xe + d_lse
     else:
         d_accum = d_xe
 
@@ -253,6 +255,8 @@ def _cce_backward_kernel(
         tl.atomic_add(
             dBias + offs_v * stride_biasv, tl.sum(d_accum.to(tl.float32), 0), mask=offs_v < V
         )
+
+    d_accum = d_accum.to(E.dtype.element_ty)
 
     if COMPUTE_DE:
         if FILTER_E_GRAD:
