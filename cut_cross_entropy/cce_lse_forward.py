@@ -15,7 +15,7 @@ def _cce_lse_forward_kernel(
     Bias,
     LSE,
     LA,
-    CorrectLogit,
+    NegCorrectLogit,
     Locks,
     Valids,
     Targets,
@@ -91,12 +91,12 @@ def _cce_lse_forward_kernel(
     if HAS_BIAS:
         bias = tl.load(Bias + offs_v * stride_biasv, mask=offs_v < V, other=0.0)
         accum += bias[None, :]
-    accum = accum.to(dtype=tl.float32)
 
     logits = tl.where(offs_v[None, :] < V, accum, -float("inf"))
     if HAS_SOFTCAP:
         logits = tl_softcapping(logits, softcap)
 
+    logits = logits.to(dtype=tl.float32)
     if HAS_LA:
         this_avg_logit = tl.sum(logits, 0) / B
         tl.atomic_add(LA + offs_v, this_avg_logit, mask=offs_v < V)
@@ -111,10 +111,12 @@ def _cce_lse_forward_kernel(
 
         offs_b = (pid_b * BLOCK_B + tl.arange(0, BLOCK_B)).to(tl.int64)
 
-        correct_logit_ptrs = CorrectLogit + offs_b
+        neg_correct_logit_ptrs = NegCorrectLogit + offs_b
 
-        correct_logit_ptrs = tl.broadcast_to(correct_logit_ptrs[:, None], (BLOCK_B, BLOCK_V))
-        tl.store(correct_logit_ptrs, logits, mask=this_targets[:, None] == offs_v[None, :])
+        neg_correct_logit_ptrs = tl.broadcast_to(
+            neg_correct_logit_ptrs[:, None], (BLOCK_B, BLOCK_V)
+        )
+        tl.store(neg_correct_logit_ptrs, -logits, mask=this_targets[:, None] == offs_v[None, :])
     else:
         offs_b = (pid_b * BLOCK_B + tl.arange(0, BLOCK_B)).to(tl.int64)
 
@@ -160,7 +162,7 @@ _cce_lse_forward_kernel = cce_forward_autotune()(_cce_lse_forward_kernel)  # typ
 class LSEReturn:
     lse: torch.Tensor
     logit_avg: torch.Tensor | None
-    correct_logit: torch.Tensor | None
+    neg_correct_logit: torch.Tensor | None
 
 
 def cce_lse_forward_kernel(
@@ -189,7 +191,7 @@ def cce_lse_forward_kernel(
     V, D = c.shape
     # Allocates output.
     lse = e.new_full((B,), -torch.inf, dtype=torch.float32)
-    correct_logit = e.new_full((B,), 0.0, dtype=torch.float32) if targets is not None else None
+    neg_correct_logit = e.new_full((B,), 0.0, dtype=torch.float32) if targets is not None else None
     assert lse.stride(0) == 1
 
     locks = e.new_full(
@@ -213,7 +215,7 @@ def cce_lse_forward_kernel(
         bias,
         lse,
         logit_avg,
-        correct_logit,
+        neg_correct_logit,
         locks,
         valids,
         targets,
@@ -233,4 +235,4 @@ def cce_lse_forward_kernel(
         B_BIN=b_bin_fn(B),
     )
 
-    return LSEReturn(lse, logit_avg, correct_logit)
+    return LSEReturn(lse, logit_avg, neg_correct_logit)

@@ -58,7 +58,11 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
         if bias is not None:
             needs_grad = needs_grad or bias.requires_grad
 
-        return_logit_avg = needs_grad and params.filter_eps is not None
+        return_logit_avg = (
+            needs_grad
+            and params.filter_eps is not None
+            and (params.filter_c_grad or params.filter_e_grad)
+        )
 
         e_info = TensorInfo(e.dtype, e.requires_grad)
         c_info = TensorInfo(c.dtype, c.requires_grad)
@@ -100,18 +104,18 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
             targets=targets,
         )
         lse = ret.lse
-        assert ret.correct_logit is not None
-        neg_dot = -ret.correct_logit
+        assert ret.neg_correct_logit is not None
+        neg_correct_logit = ret.neg_correct_logit
         logit_avg = ret.logit_avg
 
         if params.vocab_parallel_options is not None:
             lse = vp_reduce_lse(lse, pg=params.vocab_parallel_options.group)
 
-            neg_dot = vp_reduce_correct_logit(
-                neg_dot, pg=params.vocab_parallel_options.group, dtype=lse.dtype
+            neg_correct_logit = vp_reduce_correct_logit(
+                neg_correct_logit, pg=params.vocab_parallel_options.group, dtype=lse.dtype
             )
 
-        nll = neg_dot.add_(lse)
+        nll = neg_correct_logit.add_(lse)
 
         ctx.save_for_backward(e, c, bias, lse, params.targets, params.valids, logit_avg)
         ctx.params = params
@@ -120,9 +124,9 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
         ctx.bias_info = bias_info
 
         if not params.return_lse:
-            lse = None
+            ret_lse = None
         else:
-            lse = handle_reduction_none(params.batch_shape, params.valids, params.shift, lse)
+            ret_lse = handle_reduction_none(params.batch_shape, params.valids, params.shift, lse)
 
         reduction = params.reduction
         if reduction == "mean":
@@ -134,7 +138,7 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
         else:
             raise ValueError(f"Unknown reduction {reduction}")
 
-        return loss, lse
+        return loss, ret_lse
 
     @staticmethod
     @torch.amp.custom_bwd(device_type="cuda")

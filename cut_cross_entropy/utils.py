@@ -50,15 +50,15 @@ def _build_flat_valids(
 
 
 def handle_reduction_none(
-    batch_shape: torch.Size, valids: torch.Tensor | None, shift: int, loss: torch.Tensor
+    batch_shape: torch.Size, valids: torch.Tensor | None, shift: int, value: torch.Tensor
 ) -> torch.Tensor:
     if valids is None:
-        return loss.view(batch_shape)
+        return value.view(batch_shape)
 
-    full_loss = loss.new_zeros((batch_shape.numel(),))
-    full_loss[(valids + shift) if shift != 0 else valids] = loss
+    full_value = value.new_zeros((batch_shape.numel(),))
+    full_value[(valids + shift) if shift != 0 else valids] = value
 
-    return full_loss.view(batch_shape)
+    return full_value.view(batch_shape)
 
 
 @torch.compile(fullgraph=True)
@@ -114,7 +114,7 @@ def is_torch_greater_or_equal_2_5() -> bool:
     return is_package_greater_or_equal("torch", "2.5")
 
 
-@dataclass
+@dataclass(slots=True)
 class TensorInfo:
     dtype: torch.dtype
     requires_grad: bool

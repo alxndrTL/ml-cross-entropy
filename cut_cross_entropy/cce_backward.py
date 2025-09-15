@@ -183,11 +183,11 @@ def _cce_backward_kernel(
     if HAS_BIAS:
         bias = tl.load(Bias + offs_v * stride_biasv, mask=offs_v < V, other=0.0)
         accum += bias[None, :]
-    accum = accum.to(dtype=tl.float32)
 
     if HAS_SOFTCAP:
         accum = tl_softcapping(accum, softcap)
 
+    accum = accum.to(dtype=tl.float32)
     if HAS_VALIDS:
         direct_offs_b = (pid_b * BLOCK_B + tl.arange(0, BLOCK_B)).to(tl.int64)
         lse = tl.load(LSE + direct_offs_b, mask=direct_offs_b < B, other=float("inf"))
@@ -232,10 +232,10 @@ def _cce_backward_kernel(
     d_out = grad_scale * d_out
 
     d_xe = (d_accum + tl.where(is_target, -1.0, 0.0) if HAS_TARGETS else d_accum) * d_out
-    if HAS_SOFTCAP:
-        d_xe = tl_softcapping_grad(d_xe, accum, softcap)
-
     d_xe = d_xe.to(E.dtype.element_ty)
+    if HAS_SOFTCAP:
+        d_xe = tl_softcapping_grad(d_xe, accum.to(d_xe.dtype), softcap)
+
     if HAS_DLSE:
         if HAS_SHIFT:
             d_lse_offs_b = offs_b + shift
@@ -243,10 +243,10 @@ def _cce_backward_kernel(
             d_lse_offs_b = offs_b
 
         d_lse = tl.load(dLSE + d_lse_offs_b, mask=d_lse_offs_b < BMax, other=0.0)[:, None] * d_accum
-        if HAS_SOFTCAP:
-            d_lse = tl_softcapping_grad(d_lse, accum, softcap)
-
         d_lse = d_lse.to(E.dtype.element_ty)
+        if HAS_SOFTCAP:
+            d_lse = tl_softcapping_grad(d_lse, accum.to(d_lse.dtype), softcap)
+
         d_accum = d_xe + d_lse
     else:
         d_accum = d_xe
