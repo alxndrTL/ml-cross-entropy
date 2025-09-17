@@ -52,8 +52,11 @@ version = {attr = "cut_cross_entropy.__version__"}
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = "--verbose -rsxX -q"
+addopts = "--verbose -rsxX -q -m 'not manual'"
 testpaths = ["tests"]
+markers = [
+    "manual: marks tests as manual (deselected by default)"
+]
 
 [tool.ruff]
 line-length = 100

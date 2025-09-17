@@ -179,7 +179,7 @@ def _cce_backward_kernel(
 
     tl.debug_barrier()
 
-    accum = accum.to(dtype=E.dtype.element_ty)
+    accum = accum.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
     if HAS_BIAS:
         bias = tl.load(Bias + offs_v * stride_biasv, mask=offs_v < V, other=0.0)
         accum += bias[None, :]
@@ -187,13 +187,13 @@ def _cce_backward_kernel(
     if HAS_SOFTCAP:
         accum = tl_softcapping(accum, softcap)
 
-    accum = accum.to(dtype=tl.float32)
     if HAS_VALIDS:
         direct_offs_b = (pid_b * BLOCK_B + tl.arange(0, BLOCK_B)).to(tl.int64)
         lse = tl.load(LSE + direct_offs_b, mask=direct_offs_b < B, other=float("inf"))
     else:
         lse = tl.load(LSE + offs_b, mask=offs_b < B, other=float("inf"))
 
+    accum = accum.cast(tl.float32)
     d_accum = tl.exp(accum - lse[:, None])
     d_accum = tl.where(offs_v[None, :] < V, d_accum, 0.0)
 
@@ -205,19 +205,16 @@ def _cce_backward_kernel(
 
         targets = tl.load(Targets + target_offs_b, mask=target_offs_b < BMax, other=V + 1)
         is_target = targets[:, None] == offs_v[None, :]
+        d_accum += tl.where(is_target, -1.0, 0.0)
     else:
         is_target = None
 
     should_skip = False
     if (FILTER_E_GRAD and COMPUTE_DE) and (FILTER_C_GRAD and COMPUTE_DC):
-        if _block_is_filtered(
-            tl.abs(d_accum + tl.where(is_target, -1.0, 0.0) if HAS_TARGETS else d_accum), filter_eps
-        ):
+        if _block_is_filtered(tl.abs(d_accum), filter_eps):
             return
     elif (FILTER_E_GRAD and COMPUTE_DE) or (FILTER_C_GRAD and COMPUTE_DC):
-        should_skip = _block_is_filtered(
-            tl.abs(d_accum + tl.where(is_target, -1.0, 0.0) if HAS_TARGETS else d_accum), filter_eps
-        )
+        should_skip = _block_is_filtered(tl.abs(d_accum), filter_eps)
 
     if ITEM_DO:
         d_out = tl.load(dOut)
@@ -231,32 +228,33 @@ def _cce_backward_kernel(
 
     d_out = grad_scale * d_out
 
-    d_xe = (d_accum + tl.where(is_target, -1.0, 0.0) if HAS_TARGETS else d_accum) * d_out
-    d_xe = d_xe.to(E.dtype.element_ty)
-    if HAS_SOFTCAP:
-        d_xe = tl_softcapping_grad(d_xe, accum.to(d_xe.dtype), softcap)
-
     if HAS_DLSE:
         if HAS_SHIFT:
             d_lse_offs_b = offs_b + shift
         else:
             d_lse_offs_b = offs_b
 
-        d_lse = tl.load(dLSE + d_lse_offs_b, mask=d_lse_offs_b < BMax, other=0.0)[:, None] * d_accum
-        d_lse = d_lse.to(E.dtype.element_ty)
-        if HAS_SOFTCAP:
-            d_lse = tl_softcapping_grad(d_lse, accum.to(d_lse.dtype), softcap)
+        d_lse = tl.load(dLSE + d_lse_offs_b, mask=d_lse_offs_b < BMax, other=0.0)[:, None]
 
-        d_accum = d_xe + d_lse
+        d_accum *= d_out + d_lse
+
+        if HAS_TARGETS:
+            # We have d_accum = d_mm - is_target
+            # We then want to get d_accum = d_mm * (d_out + d_lse) - is_target * d_out
+            # If we do d_accum * (d_out + d_lse), we get d_mm * (d_out + d_lse) - is_target * (d_out + d_lse)
+            # So we need to do d_accum += is_target * d_lse
+
+            d_accum += tl.where(is_target, d_lse, 0.0)
     else:
-        d_accum = d_xe
+        d_accum = d_accum * d_out
+
+    if HAS_SOFTCAP:
+        d_accum = tl_softcapping_grad(d_accum, accum, softcap)
 
     if COMPUTE_DBIAS:
-        tl.atomic_add(
-            dBias + offs_v * stride_biasv, tl.sum(d_accum.to(tl.float32), 0), mask=offs_v < V
-        )
+        tl.atomic_add(dBias + offs_v * stride_biasv, tl.sum(d_accum, 0), mask=offs_v < V)
 
-    d_accum = d_accum.to(E.dtype.element_ty)
+    d_accum = d_accum.to(e_ptrs.dtype.element_ty)
 
     if COMPUTE_DE:
         if FILTER_E_GRAD:

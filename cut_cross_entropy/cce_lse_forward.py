@@ -87,7 +87,7 @@ def _cce_lse_forward_kernel(
 
     tl.debug_barrier()
 
-    accum = accum.to(dtype=E.dtype.element_ty)
+    accum = accum.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
     if HAS_BIAS:
         bias = tl.load(Bias + offs_v * stride_biasv, mask=offs_v < V, other=0.0)
         accum += bias[None, :]
@@ -96,7 +96,7 @@ def _cce_lse_forward_kernel(
     if HAS_SOFTCAP:
         logits = tl_softcapping(logits, softcap)
 
-    logits = logits.to(dtype=tl.float32)
+    logits = logits.cast(tl.float32)
     if HAS_LA:
         this_avg_logit = tl.sum(logits, 0) / B
         tl.atomic_add(LA + offs_v, this_avg_logit, mask=offs_v < V)

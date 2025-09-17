@@ -1,11 +1,30 @@
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
+from collections.abc import Callable
+
 import pytest
 import torch
 
+from cut_cross_entropy.cce_lse_forward import cce_lse_forward_kernel
 from cut_cross_entropy.indexed_dot import indexed_neg_dot_forward_kernel
 from cut_cross_entropy.utils import softcapping
 
 skip_no_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="Test requires CUDA")
+
+
+def cce_lse_kernel_indexed_dot(
+    e: torch.Tensor,
+    c: torch.Tensor,
+    inds: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    shift: int = 0,
+    valids: torch.Tensor | None = None,
+    softcap: float | None = None,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    lse_return = cce_lse_forward_kernel(e, c, bias, valids, softcap, inds, shift)
+    assert lse_return.neg_correct_logit is not None
+
+    return lse_return.neg_correct_logit.to(out_dtype)
 
 
 @skip_no_cuda
@@ -15,12 +34,14 @@ skip_no_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="Test re
 @pytest.mark.parametrize("softcap", [None, 20.0])
 @pytest.mark.parametrize("has_bias", [True, False])
 @pytest.mark.parametrize("shape", [(256, 512, 512), (255, 507, 512), (255, 507, 497)])
+@pytest.mark.parametrize("fn", [cce_lse_kernel_indexed_dot, indexed_neg_dot_forward_kernel])
 def test_indexed_dot(
     dtype: torch.dtype,
     error_tol: float,
     softcap: float | None,
     has_bias: bool,
     shape: tuple[int, int, int],
+    fn: Callable[..., torch.Tensor],
 ):
     torch.cuda.manual_seed(0)
 
@@ -56,7 +77,7 @@ def test_indexed_dot(
 
     ref = ref.to(dtype=dtype)
 
-    cce_neg_dot = indexed_neg_dot_forward_kernel(e, c, inds, bias=bias, softcap=softcap)
+    cce_neg_dot = fn(e, c, inds, bias=bias, softcap=softcap)
 
     expected_error = (gt - ref.float()).abs()
     cce_error = (gt - cce_neg_dot.float()).abs()

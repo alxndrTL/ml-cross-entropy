@@ -9,7 +9,7 @@ from cut_cross_entropy.cce_utils import CCEPreset, CCEPresets, LinearCrossEntrop
 from cut_cross_entropy.constants import IGNORE_INDEX
 from cut_cross_entropy.doc import CCE_OPTS_DOC, IMPL_DOC, LINEAR_CROSS_ENTROPY_DOC, add_doc_start
 from cut_cross_entropy.torch_compile import torch_compile_linear_cross_entropy
-from cut_cross_entropy.utils import is_torch_greater_or_equal_2_5
+from cut_cross_entropy.utils import is_torch_greater_or_equal_2_5, maybe_type_as, to_full_tensor
 from cut_cross_entropy.vocab_parallel import VocabParallelOptions
 
 PLATFORM_SYSTEM = platform.system()
@@ -27,10 +27,7 @@ if TYPE_CHECKING or is_torch_greater_or_equal_2_5():
 
 
 is_d_tensor_error_message = (
-    "Received {name} as a torch.distributed.tensor.DTensor. "
-    "This is not supported. "
-    "If possible, change the sharding strategy such that {name} is already unsharded. "
-    "If not, see https://github.com/apple/ml-cross-entropy/issues/31."
+    "Received {name} as a torch.distributed.tensor.DTensor. This is not supported. "
 )
 
 
@@ -123,10 +120,13 @@ def linear_cross_entropy(
     """
 
     if is_torch_greater_or_equal_2_5():
-        maybe_tensor_inputs = dict(e=e, c=c, targets=targets, bias=bias)
+        maybe_tensor_inputs = dict(e=e, targets=targets)
         for k, v in maybe_tensor_inputs.items():
             if isinstance(v, torch.distributed.tensor.DTensor):
                 raise ValueError(is_d_tensor_error_message.format(name=k))
+
+        c = maybe_type_as(to_full_tensor(c), e)
+        bias = maybe_type_as(to_full_tensor(bias), e)
 
     if isinstance(impl, LinearCrossEntropyImpl):
         impl = impl.name.lower()

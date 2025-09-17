@@ -2,9 +2,11 @@
 import functools
 import importlib.metadata
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast, overload
 
 import packaging.version
 import torch
+from torch.autograd import Function
 
 from cut_cross_entropy.constants import IGNORE_INDEX
 
@@ -118,3 +120,55 @@ def is_torch_greater_or_equal_2_5() -> bool:
 class TensorInfo:
     dtype: torch.dtype
     requires_grad: bool
+
+
+if TYPE_CHECKING or is_torch_greater_or_equal_2_5():
+    import torch.distributed.tensor
+    from torch.distributed.device_mesh import DeviceMesh
+
+
+class _ToFullTensorAllReduceHook(Function):
+    @staticmethod
+    def forward(ctx, tensor: torch.Tensor, device_mesh: DeviceMesh) -> torch.Tensor:
+        ctx.device_mesh = device_mesh
+        return tensor
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:  # type: ignore
+        device_mesh = cast("DeviceMesh", ctx.device_mesh)
+        grad_output = grad_output.clone()
+        grad_output.div_(device_mesh.size())
+
+        torch.distributed.all_reduce(grad_output, group=device_mesh.get_group())
+
+        return grad_output, None
+
+
+@overload
+def to_full_tensor(t: torch.Tensor) -> torch.Tensor: ...
+
+
+@overload
+def to_full_tensor(t: None) -> None: ...
+
+
+def to_full_tensor(t: torch.Tensor | None) -> torch.Tensor | None:
+    if isinstance(t, torch.distributed.tensor.DTensor):
+        return _ToFullTensorAllReduceHook.apply(t.full_tensor(), t.device_mesh)
+    else:
+        return t
+
+
+@overload
+def maybe_type_as(t: torch.Tensor, other: torch.Tensor) -> torch.Tensor: ...
+
+
+@overload
+def maybe_type_as(t: None, other: torch.Tensor) -> None: ...
+
+
+def maybe_type_as(t: torch.Tensor | None, other: torch.Tensor) -> torch.Tensor | None:
+    if isinstance(t, torch.Tensor):
+        return t.type_as(other)
+    else:
+        return None
