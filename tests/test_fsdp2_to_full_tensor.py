@@ -8,6 +8,7 @@ import torch.distributed
 import torch.distributed.tensor
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.multiprocessing.spawn import spawn as mp_spawn
 
@@ -57,6 +58,7 @@ def _target_fn_test_fsdp2_to_full_tensor(
     test_case: str,
     dtype: torch.dtype,
     error_tol: float,
+    mesh_shape: tuple[int, ...],
 ):
     device = (
         torch.device("cpu")
@@ -78,6 +80,15 @@ def _target_fn_test_fsdp2_to_full_tensor(
         backend=backend, store=store, world_size=world_size, rank=rank
     )
     store = None
+
+    # Initialize device mesh
+    if len(mesh_shape) == 1:
+        device_mesh = init_device_mesh(device.type, mesh_shape)
+    else:
+        # For 2D meshes, specify dimension names for HSDP
+        device_mesh = init_device_mesh(
+            device.type, mesh_shape, mesh_dim_names=("replicate", "shard")
+        )
 
     # Set random seed for reproducibility
     torch.manual_seed(42)
@@ -118,8 +129,8 @@ def _target_fn_test_fsdp2_to_full_tensor(
 
         param.grad = None
 
-    # Apply FSDP2 sharding
-    fully_shard(model)
+    # Apply FSDP2 sharding with device mesh
+    fully_shard(model, mesh=device_mesh)
 
     # Test case 2: Gradient only outside network forward (using to_full_tensor)
     if test_case in ("external_grad_only", "mixed_grad"):
@@ -160,56 +171,59 @@ def _target_fn_test_fsdp2_to_full_tensor(
 
 
 @pytest.mark.parametrize("dtype,error_tol", [(torch.float32, 1e-5), (torch.float16, 1e-3)])
-@pytest.mark.parametrize("nprocs", [2, 4])
+@pytest.mark.parametrize("mesh_shape", [(2,), (4,), (2, 2)])
 def test_fsdp2_to_full_tensor_external_grad_only(
     dtype: torch.dtype,
     error_tol: float,
-    nprocs: int,
+    mesh_shape: tuple[int, ...],
 ):
     """Test to_full_tensor with gradients only outside network forward method."""
+    nprocs = int(torch.tensor(mesh_shape).prod().item())
     port = find_free_port()
     mp_spawn(
         _target_fn_test_fsdp2_to_full_tensor,
-        args=(nprocs, port, "external_grad_only", dtype, error_tol),
+        args=(nprocs, port, "external_grad_only", dtype, error_tol, mesh_shape),
         nprocs=nprocs,
         join=True,
     )
 
 
 @pytest.mark.parametrize("dtype,error_tol", [(torch.float32, 1e-5), (torch.float16, 1e-3)])
-@pytest.mark.parametrize("nprocs", [2, 4])
+@pytest.mark.parametrize("mesh_shape", [(2,), (4,), (2, 2)])
 def test_fsdp2_to_full_tensor_internal_grad_only(
     dtype: torch.dtype,
     error_tol: float,
-    nprocs: int,
+    mesh_shape: tuple[int, ...],
 ):
     """Test to_full_tensor with gradients only inside network forward method."""
+    nprocs = int(torch.tensor(mesh_shape).prod().item())
     port = find_free_port()
 
     # For internal grad only, we compare against the FSDP implementation
     # since manual reduction doesn't apply here
     mp_spawn(
         _target_fn_test_fsdp2_to_full_tensor,
-        args=(nprocs, port, "internal_grad_only", dtype, error_tol),
+        args=(nprocs, port, "internal_grad_only", dtype, error_tol, mesh_shape),
         nprocs=nprocs,
         join=True,
     )
 
 
 @pytest.mark.parametrize("dtype,error_tol", [(torch.float32, 1e-5), (torch.float16, 1e-3)])
-@pytest.mark.parametrize("nprocs", [2, 4])
+@pytest.mark.parametrize("mesh_shape", [(2,), (4,), (2, 2)])
 def test_fsdp2_to_full_tensor_mixed_grad(
     dtype: torch.dtype,
     error_tol: float,
-    nprocs: int,
+    mesh_shape: tuple[int, ...],
 ):
     """Test to_full_tensor with gradients from both outside and inside network."""
+    nprocs = int(torch.tensor(mesh_shape).prod().item())
     port = find_free_port()
 
     # Test mixed gradients
     mp_spawn(
         _target_fn_test_fsdp2_to_full_tensor,
-        args=(nprocs, port, "mixed_grad", dtype, error_tol),
+        args=(nprocs, port, "mixed_grad", dtype, error_tol, mesh_shape),
         nprocs=nprocs,
         join=True,
     )

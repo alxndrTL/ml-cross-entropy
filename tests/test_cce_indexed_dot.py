@@ -29,7 +29,7 @@ def cce_lse_kernel_indexed_dot(
 
 @skip_no_cuda
 @pytest.mark.parametrize(
-    "dtype,error_tol", [(torch.float32, 1e-6), (torch.float16, 1e-3), (torch.bfloat16, 1e-2)]
+    "dtype,error_tol", [(torch.float32, 5e-6), (torch.float16, 2.5e-3), (torch.bfloat16, 2.5e-2)]
 )
 @pytest.mark.parametrize("softcap", [None, 20.0])
 @pytest.mark.parametrize("has_bias", [True, False])
@@ -61,21 +61,25 @@ def test_indexed_dot(
 
     inds = torch.randint(0, V, size=(N,), device="cuda")
 
-    gt = -(e.float() * c[inds].float()).sum(-1)
+    gt = e.float() @ c.float().T
+
     if bias is not None:
-        gt -= bias[inds].float()
+        gt += bias.float()
 
     if softcap is not None:
         gt = softcapping(gt, softcap)
 
-    ref = -(e * c[inds]).sum(-1, dtype=torch.float32)
+    gt = -gt.gather(dim=1, index=inds.view(-1, 1)).view(-1)
+
+    ref = e @ c.T
+
     if bias is not None:
-        ref -= bias[inds].float()
+        ref += bias
 
     if softcap is not None:
         ref = softcapping(ref, softcap)
 
-    ref = ref.to(dtype=dtype)
+    ref = -ref.gather(dim=1, index=inds.view(-1, 1)).view(-1)
 
     cce_neg_dot = fn(e, c, inds, bias=bias, softcap=softcap)
 

@@ -139,7 +139,8 @@ class _ToFullTensorAllReduceHook(Function):
         grad_output = grad_output.clone()
         grad_output.div_(device_mesh.size())
 
-        torch.distributed.all_reduce(grad_output, group=device_mesh.get_group())
+        for pg in device_mesh.get_all_groups():
+            torch.distributed.all_reduce(grad_output, group=pg)
 
         return grad_output, None
 

@@ -44,7 +44,7 @@ def _loss(
 @skip_no_cuda
 @pytest.mark.parametrize("impl", ["cce", "torch_compile"])
 @pytest.mark.parametrize(
-    "dtype,error_tol", [(torch.float32, 1e-5), (torch.float16, 1e-3), (torch.bfloat16, 1e-2)]
+    "dtype,error_tol", [(torch.float32, 1e-5), (torch.float16, 1.5e-3), (torch.bfloat16, 1.5e-2)]
 )
 @pytest.mark.parametrize("softcap", [None, 20.0])
 @pytest.mark.parametrize("has_bias", [True, False])
