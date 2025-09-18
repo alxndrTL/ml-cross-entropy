@@ -99,6 +99,13 @@ _indexed_neg_dot_forward_kernel = triton.heuristics(  # type: ignore
 _indexed_neg_dot_forward_kernel = indexed_dot_autotune()(_indexed_neg_dot_forward_kernel)  # type: ignore
 
 
+## NOTE
+# The functionality of this kernel has been merged into cce_lse_forward_kernel
+# to ensure that kernel-level non-determinism doesn't result in the correct
+# logit being larger than the LSE! This wouldn't directly impact the gradient
+# in vanilla cross-entropy, but would in cases with importance sampling (like in RL).
+
+
 def indexed_neg_dot_forward_kernel(
     e: torch.Tensor,
     c: torch.Tensor,

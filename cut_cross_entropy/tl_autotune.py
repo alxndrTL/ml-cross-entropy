@@ -313,7 +313,7 @@ def estimate_matmul_time(
             f"{BLOCK_B=}, {BLOCK_V=}, {BLOCK_D=}, {num_warps=}, {num_stages=}, "
             f"Total time: {total_time_ms}ms, compute time: {compute_ms}ms, "
             f"loading time: {load_ms}ms, store time: {store_ms}ms, "
-            f"Activate CTAs: {active_cta_ratio*100}%"
+            f"Activate CTAs: {active_cta_ratio * 100}%"
         )
     return total_time_ms
 
@@ -481,8 +481,17 @@ def _heuristics_from_config(
         )
 
 
-def _cce_forward_best_config() -> Config:
+## NOTE
+# Both the forward and backward kernels use the config. This ensures that
+# both forward and backward use the same tensor core instructions to compute the logits.
+# These differing can cause the logits to differ between forward and backward, which
+# really hurts the gradient.
+def _cce_best_config() -> Config:
     return Config(dict(BLOCK_B=128, BLOCK_V=128, BLOCK_D=32), num_warps=4, num_stages=4)
+
+
+def _cce_best_config_fp32() -> Config:
+    return Config(dict(BLOCK_B=32, BLOCK_V=128, BLOCK_D=32), num_warps=4, num_stages=3)
 
 
 def cce_forward_autotune() -> Callable[..., autotuner.Autotuner | autotuner.Heuristics]:
@@ -499,7 +508,7 @@ def cce_forward_autotune() -> Callable[..., autotuner.Autotuner | autotuner.Heur
             reset_to_zero=["LA"],
         )
     else:
-        return _heuristics_from_config(_cce_forward_best_config())
+        return _heuristics_from_config(_cce_best_config(), _cce_best_config_fp32(), "E")
 
 
 def _bw_total_ops_fn(B, V, D) -> float:
@@ -508,14 +517,6 @@ def _bw_total_ops_fn(B, V, D) -> float:
 
 def _bw_total_store_fn(B, V, D, dtsize, num_cta_b, num_cta_v):
     return 0.2 * (num_cta_v * B * D * dtsize + num_cta_b * D * V * dtsize)
-
-
-def _cce_backward_best_config() -> Config:
-    return Config(dict(BLOCK_B=128, BLOCK_V=128, BLOCK_D=32), num_warps=4, num_stages=4)
-
-
-def _cce_backward_best_config_fp32() -> Config:
-    return Config(dict(BLOCK_B=32, BLOCK_V=128, BLOCK_D=32), num_warps=4, num_stages=3)
 
 
 def cce_backward_autotune() -> Callable[..., autotuner.Autotuner | autotuner.Heuristics]:
@@ -537,9 +538,7 @@ def cce_backward_autotune() -> Callable[..., autotuner.Autotuner | autotuner.Heu
             reset_to_zero=["dE", "dC", "dEC", "dCC", "dBias"],
         )
     else:
-        return _heuristics_from_config(
-            _cce_backward_best_config(), _cce_backward_best_config_fp32(), "E"
-        )
+        return _heuristics_from_config(_cce_best_config(), _cce_best_config_fp32(), "E")
 
 
 def _indexed_dot_best_config() -> Config:
