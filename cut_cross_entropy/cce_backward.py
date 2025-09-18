@@ -236,7 +236,7 @@ def _cce_backward_kernel(
 
         d_lse = tl.load(dLSE + d_lse_offs_b, mask=d_lse_offs_b < BMax, other=0.0)[:, None]
 
-        d_accum *= d_out + d_lse
+        d_xe = d_accum * d_out
 
         if HAS_TARGETS:
             # We have d_accum = d_mm - is_target
@@ -244,9 +244,21 @@ def _cce_backward_kernel(
             # If we do d_accum * (d_out + d_lse), we get d_mm * (d_out + d_lse) - is_target * (d_out + d_lse)
             # So we need to do d_accum += is_target * d_lse
 
-            d_accum += tl.where(is_target, d_lse, 0.0)
+            tmp = d_accum * d_lse
+            d_lse = tl.where(is_target, tmp + d_lse, tmp)
+        else:
+            d_lse = d_lse * d_accum
+
+        d_lse = d_lse.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
+        d_xe = d_xe.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
+        d_accum = d_xe + d_lse
     else:
         d_accum = d_accum * d_out
+        d_accum = d_accum.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
+
+    tl.static_assert(d_accum.dtype == E.dtype.element_ty)
+
+    d_accum = d_accum.cast(tl.float32)
 
     if HAS_SOFTCAP:
         d_accum = tl_softcapping_grad(d_accum, accum, softcap)
