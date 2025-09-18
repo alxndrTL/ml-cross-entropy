@@ -18,8 +18,9 @@ LINEAR_CROSS_ENTROPY_DOC = """Computes cross-entropy loss using the logits gener
     without allocating the intermediary (e @ c.T).float() matrix.
 
     :param e: Embedding of the inputs used to compute the logits. Shape (..., D)
-    :param c: Classifier matrix. Shape (NumClasses, D)
+    :param c: Classifier matrix. Shape (NumClasses, D). Can be a DTensor. See the note for semantics.
     :param targets: The target class for each input. Values must be in [0, NumClasses). Shape (...)
+    :param bias: An optional bias. Shape (NumClasses). Can be a DTensor.
     :param ignore_index: If an input as a target of this value, it is ignored in the loss computation.
     :param softcap: The value for logit softcapping.
     :param reduction: The reduction to perform over the loss. Supports "mean", "sum", and "none".
@@ -49,7 +50,8 @@ CCE_OPTS_DOC = [
     """
     :param accum_e_fp32: Whether or not to use fp32 accumulation for dE (use Kahan summation for Triton < 3.2 to work around a bug).
         This is useful when working with models with a very large vocabulary or very long sequence lengths.""",
-    """:param accum_c_fp32: Whether or not to use fp32 accumulation for dC (use Kahan summation for Triton < 3.2 to work around a bug).
+    """
+    :param accum_c_fp32: Whether or not to use fp32 accumulation for dC (use Kahan summation for Triton < 3.2 to work around a bug).
         This is useful when working with models with a very large vocabulary or very long sequence lengths.""",
     """
     :param filter_e_grad: Whether or not to apply gradient filter to the embedding gradient (dE). If filter_eps is None, this
@@ -67,10 +69,35 @@ IMPL_DOC = """
         provided values be ignored.
 """.format(impls=set(v.name.lower() for v in LinearCrossEntropyImpl))
 
+DTENSOR_NOTE = """
+Note:
+    When c and the optional bias are given as a torch.distributed.tensor.DTensor,
+    the assumption is that these are tensors produced by PyTorch's fully_shard and thus
+    data-parallel semantics apply.
+
+    CCE will do the following:
+        1. Gather the full tensor.
+        2. Cast to the same dtype as e.
+
+    On backward the following will be done:
+        1. The gradient will be casted back to original dtype
+        2. The gradient will be all-reduced
+        3. The all-reduced gradient will be sharded to create the DTensor's gradient.
+"""
+
 
 def add_doc_start(*docstr: str):
     def add_doc(fn):
         fn.__doc__ = "".join(docstr) + (fn.__doc__ if fn.__doc__ is not None else "")
+
+        return fn
+
+    return add_doc
+
+
+def add_doc_end(*docstr: str):
+    def add_doc(fn):
+        fn.__doc__ = (fn.__doc__ if fn.__doc__ is not None else "") + "".join(docstr)
 
         return fn
 

@@ -7,7 +7,14 @@ import torch.nn as nn
 
 from cut_cross_entropy.cce_utils import CCEPreset, CCEPresets, LinearCrossEntropyImpl
 from cut_cross_entropy.constants import IGNORE_INDEX
-from cut_cross_entropy.doc import CCE_OPTS_DOC, IMPL_DOC, LINEAR_CROSS_ENTROPY_DOC, add_doc_start
+from cut_cross_entropy.doc import (
+    CCE_OPTS_DOC,
+    DTENSOR_NOTE,
+    IMPL_DOC,
+    LINEAR_CROSS_ENTROPY_DOC,
+    add_doc_end,
+    add_doc_start,
+)
 from cut_cross_entropy.torch_compile import torch_compile_linear_cross_entropy
 from cut_cross_entropy.utils import is_torch_greater_or_equal_2_5, maybe_type_as, to_full_tensor
 from cut_cross_entropy.vocab_parallel import VocabParallelOptions
@@ -95,8 +102,9 @@ def linear_cross_entropy(
 
 
 @add_doc_start(LINEAR_CROSS_ENTROPY_DOC)
-@add_doc_start(*(doc_str + " Only valid for the cce implementation.\n" for doc_str in CCE_OPTS_DOC))
+@add_doc_start(*(doc_str + " Only valid for the cce implementation." for doc_str in CCE_OPTS_DOC))
 @add_doc_start(IMPL_DOC)
+@add_doc_end(DTENSOR_NOTE)
 def linear_cross_entropy(
     e: torch.Tensor,
     c: torch.Tensor,
@@ -116,8 +124,7 @@ def linear_cross_entropy(
     vocab_parallel_options: VocabParallelOptions | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
-    :param vocab_parallel_options: Used to enable vocab parallelism.
-    """
+    :param vocab_parallel_options: Used to enable vocab parallelism."""
 
     if is_torch_greater_or_equal_2_5():
         maybe_tensor_inputs = dict(e=e, targets=targets)
