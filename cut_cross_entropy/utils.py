@@ -116,6 +116,13 @@ def is_torch_greater_or_equal_2_5() -> bool:
     return is_package_greater_or_equal("torch", "2.5")
 
 
+@functools.cache
+def is_torch_2_6() -> bool:
+    return packaging.version.parse(importlib.metadata.version("torch")) == packaging.version.parse(
+        "2.6"
+    )
+
+
 @dataclass(slots=True)
 class TensorInfo:
     dtype: torch.dtype
@@ -173,3 +180,7 @@ def maybe_type_as(t: torch.Tensor | None, other: torch.Tensor) -> torch.Tensor |
         return t.type_as(other)
     else:
         return None
+
+
+class CCEWarning(Warning):
+    pass
