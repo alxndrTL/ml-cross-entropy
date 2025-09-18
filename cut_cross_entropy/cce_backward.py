@@ -254,7 +254,7 @@ def _cce_backward_kernel(
     if COMPUTE_DBIAS:
         tl.atomic_add(dBias + offs_v * stride_biasv, tl.sum(d_accum, 0), mask=offs_v < V)
 
-    d_accum = d_accum.to(e_ptrs.dtype.element_ty)
+    d_accum = d_accum.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
 
     if COMPUTE_DE:
         if FILTER_E_GRAD:
