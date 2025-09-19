@@ -9,7 +9,6 @@ from cut_cross_entropy.cce_backward import cce_backward_kernel
 from cut_cross_entropy.cce_lse_forward import cce_lse_forward_kernel
 from cut_cross_entropy.constants import IGNORE_INDEX
 from cut_cross_entropy.doc import CCE_OPTS_DOC, LINEAR_CROSS_ENTROPY_DOC, add_doc_start
-from cut_cross_entropy.indexed_dot import indexed_neg_dot_forward_kernel
 from cut_cross_entropy.utils import (
     TensorInfo,
     _build_flat_valids,
@@ -59,7 +58,11 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
         if bias is not None:
             needs_grad = needs_grad or bias.requires_grad
 
-        return_logit_avg = needs_grad and params.filter_eps is not None
+        return_logit_avg = (
+            needs_grad
+            and params.filter_eps is not None
+            and (params.filter_c_grad or params.filter_e_grad)
+        )
 
         e_info = TensorInfo(e.dtype, e.requires_grad)
         c_info = TensorInfo(c.dtype, c.requires_grad)
@@ -75,6 +78,21 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
             if bias is not None:
                 bias = bias.to(dtype=torch.get_autocast_gpu_dtype())
 
+        targets = params.targets
+        if (vp_opts := params.vocab_parallel_options) is not None:
+            is_my_target = (targets >= vp_opts.start) & (targets < vp_opts.stop)
+            targets = torch.where(
+                is_my_target,
+                targets - vp_opts.start,
+                ## NB
+                # The backward kernel already uses
+                # c.size(0) + 1 as the padding value to ensure that
+                # (targets.size(0) % block_size) == 0, so for targets
+                # that aren't in this VP rank's range, we can just consider
+                # them as padded and all work work as expected.
+                targets.new_full((), c.size(0) + 1),
+            )
+
         ret = cce_lse_forward_kernel(
             e=e,
             c=c,
@@ -82,61 +100,22 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
             valids=params.valids,
             softcap=params.softcap,
             return_logit_avg=return_logit_avg,
-        )
-        if return_logit_avg:
-            assert isinstance(ret, tuple)
-            lse, logit_avg = ret
-        else:
-            assert isinstance(ret, torch.Tensor)
-            lse = ret
-            logit_avg = None
-
-        if (vp_opts := params.vocab_parallel_options) is not None:
-            lse = vp_reduce_lse(lse, pg=vp_opts.group)
-
-            if params.valids is not None:
-                targets = params.targets[params.valids + params.shift]
-            else:
-                targets = params.targets
-
-            vp_valids = (
-                ((targets >= vp_opts.start) & (targets < vp_opts.stop)).nonzero().to(torch.int32)
-            )
-            assert vp_valids.size(1) == 1
-            vp_valids = vp_valids.squeeze(-1)
-
-            if params.valids is not None:
-                neg_dot_valids = params.valids[vp_valids]
-            else:
-                neg_dot_valids = vp_valids
-
-            neg_dot_targets = params.targets - vp_opts.start
-        else:
-            neg_dot_valids = params.valids
-            neg_dot_targets = params.targets
-            vp_valids = None
-
-        neg_dot = indexed_neg_dot_forward_kernel(
-            e=e,
-            c=c,
-            inds=neg_dot_targets,
-            bias=bias,
             shift=params.shift,
-            valids=neg_dot_valids,
-            softcap=params.softcap,
-            out_dtype=lse.dtype,
+            targets=targets,
         )
+        lse = ret.lse
+        assert ret.neg_correct_logit is not None
+        neg_correct_logit = ret.neg_correct_logit
+        logit_avg = ret.logit_avg
 
         if params.vocab_parallel_options is not None:
-            global_neg_dot = neg_dot.new_zeros(lse.size())
-            assert vp_valids is not None
-            global_neg_dot[vp_valids] = neg_dot
+            lse = vp_reduce_lse(lse, pg=params.vocab_parallel_options.group)
 
-            neg_dot = vp_reduce_correct_logit(
-                global_neg_dot, pg=params.vocab_parallel_options.group, dtype=lse.dtype
+            neg_correct_logit = vp_reduce_correct_logit(
+                neg_correct_logit, pg=params.vocab_parallel_options.group, dtype=lse.dtype
             )
 
-        nll = neg_dot.add_(lse)
+        nll = neg_correct_logit.add_(lse)
 
         ctx.save_for_backward(e, c, bias, lse, params.targets, params.valids, logit_avg)
         ctx.params = params
@@ -145,9 +124,9 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
         ctx.bias_info = bias_info
 
         if not params.return_lse:
-            lse = None
+            ret_lse = None
         else:
-            lse = handle_reduction_none(params.batch_shape, params.valids, params.shift, lse)
+            ret_lse = handle_reduction_none(params.batch_shape, params.valids, params.shift, lse)
 
         reduction = params.reduction
         if reduction == "mean":
@@ -159,7 +138,7 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
         else:
             raise ValueError(f"Unknown reduction {reduction}")
 
-        return loss, lse
+        return loss, ret_lse
 
     @staticmethod
     @torch.amp.custom_bwd(device_type="cuda")

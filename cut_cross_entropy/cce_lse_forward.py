@@ -1,5 +1,5 @@
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
-from typing import Literal, overload
+from dataclasses import dataclass
 
 import torch
 import triton
@@ -15,9 +15,12 @@ def _cce_lse_forward_kernel(
     Bias,
     LSE,
     LA,
+    NegCorrectLogit,
     Locks,
     Valids,
+    Targets,
     softcap,
+    shift,
     B,
     V,
     D,
@@ -27,7 +30,6 @@ def _cce_lse_forward_kernel(
     stride_cv,
     stride_cd,
     stride_biasv,
-    stride_lse_b,
     stride_vb,
     num_locks,
     # Meta-parameters
@@ -42,6 +44,8 @@ def _cce_lse_forward_kernel(
     HAS_SOFTCAP: tl.constexpr,
     HAS_LA: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
+    HAS_TARGETS: tl.constexpr,
+    HAS_SHIFT: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
     num_pid_b = tl.cdiv(B, BLOCK_B)
@@ -83,27 +87,45 @@ def _cce_lse_forward_kernel(
 
     tl.debug_barrier()
 
+    accum = accum.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
     if HAS_BIAS:
         bias = tl.load(Bias + offs_v * stride_biasv, mask=offs_v < V, other=0.0)
-        bias = bias.to(dtype=accum.dtype)
         accum += bias[None, :]
 
     logits = tl.where(offs_v[None, :] < V, accum, -float("inf"))
     if HAS_SOFTCAP:
         logits = tl_softcapping(logits, softcap)
 
+    logits = logits.cast(tl.float32)
     if HAS_LA:
         this_avg_logit = tl.sum(logits, 0) / B
         tl.atomic_add(LA + offs_v, this_avg_logit, mask=offs_v < V)
 
-    this_mx = tl.max(logits, axis=1)
-    e = tl.exp(logits - this_mx[:, None])
-    this_lse = this_mx + tl.log(tl.sum(e, axis=1))
+    if HAS_TARGETS:
+        if HAS_SHIFT:
+            target_offs_b = offs_b + shift
+        else:
+            target_offs_b = offs_b
 
-    offs_b = (pid_b * BLOCK_B + tl.arange(0, BLOCK_B)).to(tl.int64)
+        this_targets = tl.load(Targets + target_offs_b, mask=target_offs_b < BMax, other=V + 1)
+
+        offs_b = (pid_b * BLOCK_B + tl.arange(0, BLOCK_B)).to(tl.int64)
+
+        neg_correct_logit_ptrs = NegCorrectLogit + offs_b
+
+        neg_correct_logit_ptrs = tl.broadcast_to(
+            neg_correct_logit_ptrs[:, None], (BLOCK_B, BLOCK_V)
+        )
+        tl.store(neg_correct_logit_ptrs, -logits, mask=this_targets[:, None] == offs_v[None, :])
+    else:
+        offs_b = (pid_b * BLOCK_B + tl.arange(0, BLOCK_B)).to(tl.int64)
+
+    this_mx = tl.max(logits, axis=1)
+    this_lse = this_mx + tl.log(tl.sum(tl.exp(logits - this_mx[:, None]), axis=1))
+
     o_mask = offs_b < B
 
-    lse_ptrs = LSE + (stride_lse_b * offs_b)
+    lse_ptrs = LSE + offs_b
 
     this_locks = Locks + (pid_b // tl.cdiv(B, BLOCK_B * num_locks))
     while tl.atomic_cas(this_locks, 0, 1) == 1:
@@ -111,7 +133,7 @@ def _cce_lse_forward_kernel(
 
     lse = tl.load(lse_ptrs, mask=o_mask, other=0.0, eviction_policy="evict_last")
     lse = tl_logaddexp(lse, this_lse)
-    tl.store(lse_ptrs, lse, mask=o_mask, eviction_policy="evict_last")
+    lse = tl.store(lse_ptrs, lse, mask=o_mask, eviction_policy="evict_last")
 
     tl.debug_barrier()
     tl.atomic_xchg(this_locks, 0)
@@ -129,52 +151,30 @@ _cce_lse_forward_kernel = triton.heuristics(  # type: ignore
         "DOT_PRECISION": lambda args: "tf32"
         if torch.get_float32_matmul_precision() == "high"
         else "ieee",
+        "HAS_TARGETS": lambda args: args["Targets"] is not None,
+        "HAS_SHIFT": lambda args: args["shift"] != 0,
     }
 )(_cce_lse_forward_kernel)
 _cce_lse_forward_kernel = cce_forward_autotune()(_cce_lse_forward_kernel)  # type: ignore
 
 
-@overload
+@dataclass(slots=True)
+class LSEReturn:
+    lse: torch.Tensor
+    logit_avg: torch.Tensor | None
+    neg_correct_logit: torch.Tensor | None
+
+
 def cce_lse_forward_kernel(
     e: torch.Tensor,
     c: torch.Tensor,
     bias: torch.Tensor | None = None,
     valids: torch.Tensor | None = None,
     softcap: float | None = None,
-    return_logit_avg: Literal[False] = False,
-) -> torch.Tensor: ...
-
-
-@overload
-def cce_lse_forward_kernel(
-    e: torch.Tensor,
-    c: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    valids: torch.Tensor | None = None,
-    softcap: float | None = None,
-    return_logit_avg: Literal[True] = True,
-) -> tuple[torch.Tensor, torch.Tensor]: ...
-
-
-@overload
-def cce_lse_forward_kernel(
-    e: torch.Tensor,
-    c: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    valids: torch.Tensor | None = None,
-    softcap: float | None = None,
+    targets: torch.Tensor | None = None,
+    shift: int = 0,
     return_logit_avg: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor: ...
-
-
-def cce_lse_forward_kernel(
-    e: torch.Tensor,
-    c: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    valids: torch.Tensor | None = None,
-    softcap: float | None = None,
-    return_logit_avg: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor] | torch.Tensor:
+) -> LSEReturn:
     # Check constraints.
     assert e.shape[1] == c.shape[1], "Incompatible dimensions"
     assert e.is_contiguous(), "Matrix A must be contiguous"
@@ -190,7 +190,10 @@ def cce_lse_forward_kernel(
 
     V, D = c.shape
     # Allocates output.
-    lse = e.new_full((B,), -float("inf"), dtype=torch.float32)
+    lse = e.new_full((B,), -torch.inf, dtype=torch.float32)
+    neg_correct_logit = e.new_full((B,), 0.0, dtype=torch.float32) if targets is not None else None
+    assert lse.stride(0) == 1
+
     locks = e.new_full(
         (triton.cdiv(B, 128),),
         0,
@@ -210,11 +213,14 @@ def cce_lse_forward_kernel(
         e,
         c,
         bias,
-        lse,  #
+        lse,
         logit_avg,
+        neg_correct_logit,
         locks,
         valids,
+        targets,
         softcap,
+        shift,
         B,
         V,
         D,  #
@@ -224,14 +230,9 @@ def cce_lse_forward_kernel(
         c.stride(0),
         c.stride(1),  #
         1 if bias is None else bias.stride(0),
-        lse.stride(0),
         1 if valids is None else valids.stride(0),
         num_locks=locks.size(0),
         B_BIN=b_bin_fn(B),
     )
 
-    if return_logit_avg:
-        assert logit_avg is not None
-        return lse, logit_avg
-    else:
-        return lse
+    return LSEReturn(lse, logit_avg, neg_correct_logit)

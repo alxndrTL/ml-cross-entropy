@@ -1,5 +1,6 @@
 # Copyright (C) 2024 Apple Inc. All Rights Reserved.
 import platform
+import warnings
 from typing import TYPE_CHECKING, Literal, overload
 
 import torch
@@ -7,10 +8,25 @@ import torch.nn as nn
 
 from cut_cross_entropy.cce_utils import CCEPreset, CCEPresets, LinearCrossEntropyImpl
 from cut_cross_entropy.constants import IGNORE_INDEX
-from cut_cross_entropy.doc import CCE_OPTS_DOC, IMPL_DOC, LINEAR_CROSS_ENTROPY_DOC, add_doc_start
+from cut_cross_entropy.doc import (
+    CCE_OPTS_DOC,
+    DTENSOR_NOTE,
+    IMPL_DOC,
+    LINEAR_CROSS_ENTROPY_DOC,
+    add_doc_end,
+    add_doc_start,
+)
 from cut_cross_entropy.torch_compile import torch_compile_linear_cross_entropy
-from cut_cross_entropy.utils import is_torch_greater_or_equal_2_5
+from cut_cross_entropy.utils import (
+    CCEWarning,
+    is_torch_2_6,
+    is_torch_greater_or_equal_2_5,
+    maybe_type_as,
+    to_full_tensor,
+)
 from cut_cross_entropy.vocab_parallel import VocabParallelOptions
+
+warnings.filterwarnings("once", category=CCEWarning, module="cut_cross_entropy")
 
 PLATFORM_SYSTEM = platform.system()
 
@@ -27,10 +43,7 @@ if TYPE_CHECKING or is_torch_greater_or_equal_2_5():
 
 
 is_d_tensor_error_message = (
-    "Received {name} as a torch.distributed.tensor.DTensor. "
-    "This is not supported. "
-    "If possible, change the sharding strategy such that {name} is already unsharded. "
-    "If not, see https://github.com/apple/ml-cross-entropy/issues/31."
+    "Received {name} as a torch.distributed.tensor.DTensor. This is not supported. "
 )
 
 
@@ -98,8 +111,9 @@ def linear_cross_entropy(
 
 
 @add_doc_start(LINEAR_CROSS_ENTROPY_DOC)
-@add_doc_start(*(doc_str + " Only valid for the cce implementation.\n" for doc_str in CCE_OPTS_DOC))
+@add_doc_start(*(doc_str + " Only valid for the cce implementation." for doc_str in CCE_OPTS_DOC))
 @add_doc_start(IMPL_DOC)
+@add_doc_end(DTENSOR_NOTE)
 def linear_cross_entropy(
     e: torch.Tensor,
     c: torch.Tensor,
@@ -119,14 +133,16 @@ def linear_cross_entropy(
     vocab_parallel_options: VocabParallelOptions | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
-    :param vocab_parallel_options: Used to enable vocab parallelism.
-    """
+    :param vocab_parallel_options: Used to enable vocab parallelism."""
 
     if is_torch_greater_or_equal_2_5():
-        maybe_tensor_inputs = dict(e=e, c=c, targets=targets, bias=bias)
+        maybe_tensor_inputs = dict(e=e, targets=targets)
         for k, v in maybe_tensor_inputs.items():
             if isinstance(v, torch.distributed.tensor.DTensor):
                 raise ValueError(is_d_tensor_error_message.format(name=k))
+
+        c = maybe_type_as(to_full_tensor(c), e)
+        bias = maybe_type_as(to_full_tensor(bias), e)
 
     if isinstance(impl, LinearCrossEntropyImpl):
         impl = impl.name.lower()
@@ -148,6 +164,15 @@ def linear_cross_entropy(
         if platform.system() == "Darwin":
             raise RuntimeError(
                 "CCE does not support MacOS. Please use torch_compile when running on MacOS instead."
+            )
+
+        if is_torch_2_6():
+            warnings.warn(
+                "There is a known issue with CCE and the triton that ships with PyTorch 2.6"
+                " that can result in incorrect gradients. If possible, please verify that you"
+                " are not impacted by this bug by trying PyTorch>2.6",
+                CCEWarning,
+                stacklevel=2,
             )
 
         cce_opts = CCEPresets.build_for_impl(

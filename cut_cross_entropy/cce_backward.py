@@ -179,9 +179,9 @@ def _cce_backward_kernel(
 
     tl.debug_barrier()
 
+    accum = accum.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
     if HAS_BIAS:
         bias = tl.load(Bias + offs_v * stride_biasv, mask=offs_v < V, other=0.0)
-        bias = bias.to(dtype=accum.dtype)
         accum += bias[None, :]
 
     if HAS_SOFTCAP:
@@ -193,6 +193,7 @@ def _cce_backward_kernel(
     else:
         lse = tl.load(LSE + offs_b, mask=offs_b < B, other=float("inf"))
 
+    accum = accum.cast(tl.float32)
     d_accum = tl.exp(accum - lse[:, None])
     d_accum = tl.where(offs_v[None, :] < V, d_accum, 0.0)
 
@@ -253,7 +254,7 @@ def _cce_backward_kernel(
     if COMPUTE_DBIAS:
         tl.atomic_add(dBias + offs_v * stride_biasv, tl.sum(d_accum, 0), mask=offs_v < V)
 
-    d_accum = d_accum.to(e_ptrs.dtype.element_ty)
+    d_accum = d_accum.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
 
     if COMPUTE_DE:
         if FILTER_E_GRAD:
