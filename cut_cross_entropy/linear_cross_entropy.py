@@ -57,6 +57,8 @@ def linear_cross_entropy(
     softcap: float | None = None,
     reduction: str = "mean",
     shift: bool | int = 0,
+    alpha_fwd: float = 1.,
+    alpha_bwd: float = 1.,
     return_lse: Literal[False] = False,
     filter_eps: float | str | None = "auto",
     accum_e_fp32: bool = False,
@@ -78,6 +80,8 @@ def linear_cross_entropy(
     softcap: float | None = None,
     reduction: str = "mean",
     shift: bool | int = 0,
+    alpha_fwd: float = 1.,
+    alpha_bwd: float = 1.,
     return_lse: Literal[True] = True,
     filter_eps: float | str | None = "auto",
     accum_e_fp32: bool = False,
@@ -99,6 +103,8 @@ def linear_cross_entropy(
     softcap: float | None = None,
     reduction: str = "mean",
     shift: bool | int = 0,
+    alpha_fwd: float = 1.,
+    alpha_bwd: float = 1.,
     return_lse: bool = False,
     filter_eps: float | str | None = "auto",
     accum_e_fp32: bool = False,
@@ -123,6 +129,8 @@ def linear_cross_entropy(
     softcap: float | None = None,
     reduction: str = "mean",
     shift: bool | int = 0,
+    alpha_fwd: float = 1.,
+    alpha_bwd: float = 1.,
     return_lse: bool = False,
     filter_eps: float | str | None = "auto",
     accum_e_fp32: bool = False,
@@ -196,11 +204,15 @@ def linear_cross_entropy(
             softcap,
             reduction,
             shift,
+            alpha_fwd,
+            alpha_bwd,
             **cce_opts,
             vocab_parallel_options=vocab_parallel_options,
             return_lse=return_lse,
         )
     elif impl == "torch_compile":
+        assert alpha_fwd == 1.
+        assert alpha_bwd == 1.
         loss, lse = torch_compile_linear_cross_entropy(
             e,
             c,

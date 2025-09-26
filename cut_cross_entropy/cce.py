@@ -52,6 +52,8 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
         e: torch.Tensor,
         c: torch.Tensor,
         bias: torch.Tensor | None,
+        alpha_fwd: float,
+        alpha_bwd: float,
         params: CCEParams,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         needs_grad = e.requires_grad or c.requires_grad
@@ -101,6 +103,7 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
             softcap=params.softcap,
             return_logit_avg=return_logit_avg,
             shift=params.shift,
+            alpha_fwd=alpha_fwd,
             targets=targets,
         )
         lse = ret.lse
@@ -122,6 +125,8 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
         ctx.e_info = e_info
         ctx.c_info = c_info
         ctx.bias_info = bias_info
+        ctx.alpha_fwd = alpha_fwd
+        ctx.alpha_bwd = alpha_bwd
 
         if not params.return_lse:
             ret_lse = None
@@ -144,7 +149,7 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
     @torch.amp.custom_bwd(device_type="cuda")
     def backward(
         ctx, grad_out: torch.Tensor, grad_lse_out: torch.Tensor | None
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, None]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, None, None, None]:
         e, c, bias, lse, targets, valids, logit_avg = ctx.saved_tensors
 
         if logit_avg is not None:
@@ -203,6 +208,8 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
             shift=params.shift,
             vocab_ordering=vocab_ordering,
             grad_scale=grad_scale,
+            alpha_fwd=ctx.alpha_fwd,
+            alpha_bwd=ctx.alpha_bwd,
             accum_e_fp32=params.accum_e_fp32,
             accum_c_fp32=params.accum_c_fp32,
             filter_e_grad=params.filter_e_grad,
@@ -211,18 +218,20 @@ class LinearCrossEntropyFunction(torch.autograd.Function):
             pg=pg,
         )
 
-        return de, dc, dbias, None
+        return de, dc, dbias, None, None, None
 
 
 def linear_cross_entropy_apply(
     e: torch.Tensor,
     c: torch.Tensor,
     bias: torch.Tensor | None,
+    alpha_fwd: float,
+    alpha_bwd: float,
     params: CCEParams,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     loss, lse = cast(
         tuple[torch.Tensor, torch.Tensor | None],
-        LinearCrossEntropyFunction.apply(e, c, bias, params),
+        LinearCrossEntropyFunction.apply(e, c, bias, alpha_fwd, alpha_bwd, params),
     )
 
     if params.shift != 0 and params.reduction == "none":
@@ -246,6 +255,8 @@ def cce_linear_cross_entropy(
     softcap: float | None = None,
     reduction: str = "mean",
     shift: bool | int = 0,
+    alpha_fwd: float = 1.0,
+    alpha_bwd: float = 1.0,
     return_lse: bool = False,
     filter_eps: float | str | None = "auto",
     accum_e_fp32: bool = False,
@@ -295,4 +306,4 @@ def cce_linear_cross_entropy(
         return_lse=return_lse,
     )
 
-    return linear_cross_entropy_apply(e, c, bias, cce_params)
+    return linear_cross_entropy_apply(e, c, bias, alpha_fwd, alpha_bwd, cce_params)

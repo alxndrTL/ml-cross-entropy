@@ -111,6 +111,8 @@ def _cce_backward_kernel(
     stride_vb,
     filter_eps,
     shift,
+    alpha_fwd,
+    alpha_bwd,
     B_BIN,
     BLOCK_B: tl.constexpr,
     BLOCK_V: tl.constexpr,
@@ -178,6 +180,8 @@ def _cce_backward_kernel(
         c_ptrs += BLOCK_D * stride_cd
 
     tl.debug_barrier()
+
+    accum = accum * alpha_fwd
 
     accum = accum.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
     if HAS_BIAS:
@@ -254,7 +258,7 @@ def _cce_backward_kernel(
     if COMPUTE_DBIAS:
         tl.atomic_add(dBias + offs_v * stride_biasv, tl.sum(d_accum, 0), mask=offs_v < V)
 
-    d_accum = d_accum.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
+    d_accum_mm = (d_accum * alpha_bwd).cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
 
     if COMPUTE_DE:
         if FILTER_E_GRAD:
@@ -266,7 +270,7 @@ def _cce_backward_kernel(
             lock_offset = (pid_b // tl.cdiv(B, BLOCK_B * n_de_locks_0)) * n_de_locks_1
 
             _mm_backward(
-                d_accum,
+                d_accum_mm,
                 dE + (offs_b[:, None] * stride_eb),
                 dEC + (offs_b[:, None] * stride_eb) if KAHAN_E else None,
                 offs_b[:, None] < BMax,
@@ -293,7 +297,7 @@ def _cce_backward_kernel(
             lock_offset = (pid_v // tl.cdiv(V, BLOCK_V * n_dc_locks_0)) * n_dc_locks_1
 
             _mm_backward(
-                tl.trans(d_accum),
+                tl.trans(d_accum_mm),
                 dC + (offs_v[:, None] * stride_cv),
                 dCC + (offs_v[:, None] * stride_cv) if KAHAN_C else None,
                 offs_v[:, None] < V,
@@ -361,6 +365,8 @@ def cce_backward_kernel(
     shift: int = 0,
     vocab_ordering: torch.Tensor | None = None,
     grad_scale: float = 1.0,
+    alpha_fwd: float = 1.0,
+    alpha_bwd: float = 1.0,
     accum_e_fp32: bool = False,
     accum_c_fp32: bool = False,
     filter_e_grad: bool = True,
@@ -501,6 +507,8 @@ def cce_backward_kernel(
         1 if valids is None else valids.stride(0),
         filter_eps,
         shift=shift,
+        alpha_fwd=alpha_fwd,
+        alpha_bwd=alpha_bwd,
         B_BIN=b_bin_fn(B),
         FILTER_E_GRAD=filter_e_grad and de is not None,
         FILTER_C_GRAD=filter_c_grad and dc is not None,

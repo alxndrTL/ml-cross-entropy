@@ -21,6 +21,7 @@ def _cce_lse_forward_kernel(
     Targets,
     softcap,
     shift,
+    alpha_fwd,
     B,
     V,
     D,
@@ -86,6 +87,8 @@ def _cce_lse_forward_kernel(
         c_ptrs += BLOCK_D * stride_cd
 
     tl.debug_barrier()
+
+    accum = accum * alpha_fwd
 
     accum = accum.cast(E.dtype.element_ty, fp_downcast_rounding="rtne")
     if HAS_BIAS:
@@ -173,6 +176,7 @@ def cce_lse_forward_kernel(
     softcap: float | None = None,
     targets: torch.Tensor | None = None,
     shift: int = 0,
+    alpha_fwd: float = 1.,
     return_logit_avg: bool = False,
 ) -> LSEReturn:
     # Check constraints.
@@ -221,6 +225,7 @@ def cce_lse_forward_kernel(
         targets,
         softcap,
         shift,
+        alpha_fwd,
         B,
         V,
         D,  #
