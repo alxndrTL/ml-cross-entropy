@@ -25,7 +25,7 @@ linear-cross-entropy using `torch.compile`. This implementation will be set to t
 
 **Installation**
 ```bash
-pip install "cut-cross-entropy @ git+https://github.com/apple/ml-cross-entropy.git"
+pip install "cut-cross-entropy @ git+https://github.com/alxndrTL/ml-cross-entropy.git"
 ```
 
 **Usage**
